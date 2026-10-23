@@ -8,6 +8,13 @@ export interface Observer {
   heightKm: number
 }
 
+export interface Look {
+  time: Date
+  elevation: number // degrees above horizon (negative = below)
+  azimuth: number   // degrees, 0 = north, 90 = east
+  visible: boolean  // can you see it with your eyes right now?
+}
+
 export interface Pass {
   rise: Date
   set: Date
@@ -61,22 +68,22 @@ function isSunlit(sat: Vec3, sun: Vec3): boolean {
   return distFromShadowAxis > EARTH_RADIUS_KM
 }
 
-// One moment in time: where is the ISS in my sky, and can I see it?
-function sample(sat: Satellite, observer: Observer, time: Date) {
+// One moment in time: where is the satellite in my sky, and can I see it?
+export function lookFrom(sat: Satellite, observer: Observer, time: Date): Look | null {
   const pv = propagate(sat, time)
   if (!pv || typeof pv.position !== 'object') return null
 
   const gmst = gstime(time)
-  const iss = lookAngles(observer, pv.position, gmst)
+  const target = lookAngles(observer, pv.position, gmst)
   const sunEci = sunPositionEci(time)
   const sun = lookAngles(observer, sunEci, gmst)
 
   const visible =
-    iss.elevation >= MIN_ELEVATION_DEG && // 1. high enough
+    target.elevation >= MIN_ELEVATION_DEG && // 1. high enough
     sun.elevation < SUN_MAX_ELEVATION_DEG && // 2. dark for me
-    isSunlit(pv.position, sunEci) // 3. ISS in sunlight
+    isSunlit(pv.position, sunEci) // 3. satellite in sunlight
 
-  return { time, elevation: iss.elevation, azimuth: iss.azimuth, visible }
+  return { time, elevation: target.elevation, azimuth: target.azimuth, visible }
 }
 
 // Step through time and collect every pass above MIN_ELEVATION_DEG
@@ -86,12 +93,12 @@ export function findPasses(sat: Satellite, observer: Observer, start: Date, hour
   const end = start.getTime() + hours * 3_600_000
 
   for (let t = start.getTime(); t <= end; t += STEP_MS) {
-    const s = sample(sat, observer, new Date(t))
+    const s = lookFrom(sat, observer, new Date(t))
     if (!s) continue
     const above = s.elevation >= MIN_ELEVATION_DEG
 
     if (above && !current) {
-      // Pass starts
+      // Pass starts (AOS)
       current = {
         rise: s.time,
         set: s.time,
@@ -111,7 +118,7 @@ export function findPasses(sat: Satellite, observer: Observer, start: Date, hour
       }
       if (s.visible) current.visible = true
     } else if (!above && current) {
-      // Pass ends
+      // Pass ends (LOS)
       passes.push(current)
       current = null
     }

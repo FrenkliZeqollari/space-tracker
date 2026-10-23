@@ -24,7 +24,7 @@ let resizeObserver: ResizeObserver | null = null
 
 // ONE marker object that we update, instead of a new one every second.
 // globe.gl then moves the existing 3D dot instead of rebuilding it.
-const issMarker: GeoPosition = { latitude: 0, longitude: 0, altitudeKm: 0 }
+const issMarker: GeoPosition = { latitude: 0, longitude: 0, altitudeKm: 0, speedKmS: 0 }
 
 function updateIss() {
   if (!globe || !props.position) return
@@ -111,7 +111,7 @@ onUnmounted(() => {
     <div ref="container" class="globe"></div>
     <label class="follow">
       <input v-model="follow" type="checkbox" />
-      Follow ISS
+      FOLLOW ISS
     </label>
   </div>
 </template>
@@ -120,9 +120,9 @@ onUnmounted(() => {
 .globe-wrapper {
   position: relative;
   width: 100%;
-  height: 70vh;
-  border-radius: 12px;
+  height: 100%;
   overflow: hidden;
+  border-radius: 10px;
   background: #000;
 }
 
@@ -135,11 +135,21 @@ onUnmounted(() => {
   position: absolute;
   top: 12px;
   right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 6px 10px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
-  font-size: 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(5, 7, 13, 0.75);
+  color: var(--text);
+  font-family: var(--font-data);
+  font-size: 11px;
+  letter-spacing: 0.08em;
   cursor: pointer;
+}
+
+.follow input {
+  accent-color: var(--accent);
 }
 </style>

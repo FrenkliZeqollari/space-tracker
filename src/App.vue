@@ -4,33 +4,45 @@ import { fetchTle, type Tle } from './services/tle'
 import {
   getGroundTrack,
   getPosition,
+  getTleEpoch,
   parseTle,
   type GeoPosition,
   type Satellite,
 } from './core/position'
-import { findPasses, toCompass, type Observer, type Pass } from './core/passes'
+import { findPasses, lookFrom, type Look, type Observer, type Pass } from './core/passes'
+import { formatClock } from './utils/format'
 import GlobeView from './components/GlobeView.vue'
+import TelemetryPanel from './components/TelemetryPanel.vue'
+import NextPass from './components/NextPass.vue'
+import PassList from './components/PassList.vue'
 
 const ISS_NORAD_ID = 25544
 const BERLIN: Observer = { latitude: 52.52, longitude: 13.405, heightKm: 0.034 }
 const SEARCH_HOURS = 7 * 24
 const TRACK_MINUTES = 95 // about one full orbit
+const TLE_STALE_HOURS = 72 // older than this → amber warning
 
+const now = ref(new Date())
 const tle = ref<Tle | null>(null)
+const tleEpoch = ref<Date | null>(null)
 const position = ref<GeoPosition | null>(null)
+const look = ref<Look | null>(null)
 // shallowRef: Vue only reacts when we replace the whole array,
 // it doesn't wrap the ~100 points inside (globe.gl wants plain objects)
 const track = shallowRef<GeoPosition[]>([])
 const passes = ref<Pass[]>([])
 const error = ref<string | null>(null)
 
-let positionTimer: number | undefined
+let tickTimer: number | undefined
 let trackTimer: number | undefined
 let satellite: Satellite | null = null // plain variable: the template never shows it
 
-function updatePosition() {
+// Runs every second: clock, ISS position, and where it is in Berlin's sky
+function tick() {
+  now.value = new Date()
   if (!satellite) return
-  position.value = getPosition(satellite, new Date())
+  position.value = getPosition(satellite, now.value)
+  look.value = lookFrom(satellite, BERLIN, now.value)
 }
 
 function updateTrack() {
@@ -39,13 +51,15 @@ function updateTrack() {
 }
 
 onMounted(async () => {
+  tickTimer = window.setInterval(tick, 1000) // clocks run even while loading
+
   try {
     tle.value = await fetchTle(ISS_NORAD_ID)
     satellite = parseTle(tle.value.line1, tle.value.line2) // parse once
+    tleEpoch.value = getTleEpoch(satellite)
 
-    updatePosition()
+    tick()
     updateTrack()
-    positionTimer = window.setInterval(updatePosition, 1000) // every second
     trackTimer = window.setInterval(updateTrack, 60_000) // orbit line: every minute is enough
 
     passes.value = findPasses(satellite, BERLIN, new Date(), SEARCH_HOURS)
@@ -56,76 +70,223 @@ onMounted(async () => {
 
 // Stop the timers when the component goes away, so we don't leak them
 onUnmounted(() => {
-  window.clearInterval(positionTimer)
+  window.clearInterval(tickTimer)
   window.clearInterval(trackTimer)
 })
 
-const nextVisible = computed(() => passes.value.find((p) => p.visible) ?? null)
+// Next visible pass that hasn't finished yet
+const nextVisible = computed(
+  () => passes.value.find((p) => p.visible && p.set.getTime() > now.value.getTime()) ?? null,
+)
 
-const mapUrl = computed(() => {
-  if (!position.value) return '#'
-  const { latitude: lat, longitude: lon } = position.value
-  return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=4/${lat}/${lon}`
+// Status light: how much can we trust what's on screen?
+const status = computed(() => {
+  if (error.value) return { cls: 'danger', text: 'NO SIGNAL' }
+  if (!position.value) return { cls: 'warn', text: 'ACQUIRING' }
+  const ageMs = tleEpoch.value ? now.value.getTime() - tleEpoch.value.getTime() : 0
+  if (ageMs > TLE_STALE_HOURS * 3_600_000) return { cls: 'warn', text: 'STALE DATA' }
+  return { cls: 'ok', text: 'LIVE' }
 })
 
-function formatTime(d: Date): string {
-  return d.toLocaleString('de-DE', {
-    weekday: 'short',
-    day: '2-digit',
-    month: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-function durationMin(p: Pass): number {
-  return Math.round((p.set.getTime() - p.rise.getTime()) / 60_000)
-}
+const utcTime = computed(() => formatClock(now.value, 'UTC'))
+const berlinTime = computed(() => formatClock(now.value, 'Europe/Berlin'))
 </script>
 
 <template>
-  <main>
-    <h1>Where is the ISS?</h1>
-    <p v-if="error">Error: {{ error }}</p>
+  <div class="console">
+    <header class="topbar">
+      <div class="brand">
+        <span class="status-dot" :class="status.cls"></span>
+        ISS TRACKER
+        <span class="brand-sub">// MISSION CONTROL</span>
+      </div>
 
-    <template v-else-if="position">
-      <GlobeView :position="position" :track="track" :observer="BERLIN" />
+      <div class="status-text" :class="status.cls">{{ status.text }}</div>
 
-      <p>Latitude: {{ position.latitude.toFixed(4) }}°</p>
-      <p>Longitude: {{ position.longitude.toFixed(4) }}°</p>
-      <p>Altitude: {{ position.altitudeKm.toFixed(1) }} km</p>
-      <a :href="mapUrl" target="_blank">Show on map</a>
+      <div class="clocks">
+        <div class="clock">
+          <span class="label">UTC</span>
+          <span class="value">{{ utcTime }}</span>
+        </div>
+        <div class="clock">
+          <span class="label">Berlin</span>
+          <span class="value">{{ berlinTime }}</span>
+        </div>
+      </div>
+    </header>
 
-      <h2>Next visible pass over Berlin</h2>
-      <p v-if="nextVisible">
-        ⭐ {{ formatTime(nextVisible.rise) }}: look {{ toCompass(nextVisible.riseAzimuth) }},
-        up to {{ nextVisible.maxElevation.toFixed(0) }}° high, for {{ durationMin(nextVisible) }} min
-      </p>
-      <p v-else>No visible passes in the next 7 days.</p>
+    <p v-if="error" class="error-banner">⚠ {{ error }}</p>
 
-      <h2>All passes (next 7 days)</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Rise</th>
-            <th>Max height</th>
-            <th>Direction</th>
-            <th>Duration</th>
-            <th>Visible?</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="p in passes" :key="p.rise.getTime()">
-            <td>{{ formatTime(p.rise) }}</td>
-            <td>{{ p.maxElevation.toFixed(0) }}°</td>
-            <td>{{ toCompass(p.riseAzimuth) }} → {{ toCompass(p.setAzimuth) }}</td>
-            <td>{{ durationMin(p) }} min</td>
-            <td>{{ p.visible ? '⭐ yes' : 'no' }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </template>
+    <div class="grid">
+      <section class="globe-panel">
+        <GlobeView :position="position" :track="track" :observer="BERLIN" />
+      </section>
 
-    <p v-else>Loading…</p>
-  </main>
+      <aside class="sidebar">
+        <NextPass :pass="nextVisible" :now="now" />
+        <TelemetryPanel
+          :position="position"
+          :look="look"
+          :tle-name="tle?.name ?? null"
+          :tle-source="tle?.source ?? null"
+          :tle-epoch="tleEpoch"
+          :now="now"
+          :stale-hours="TLE_STALE_HOURS"
+        />
+      </aside>
+
+      <div class="passes">
+        <PassList :passes="passes" :now="now" />
+      </div>
+    </div>
+  </div>
 </template>
+
+<style scoped>
+.console {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ===== Top bar ===== */
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 24px;
+  padding: 12px 16px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-data);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.brand-sub {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-dot.ok {
+  color: var(--ok);
+  box-shadow: 0 0 10px var(--ok);
+  animation: pulse 2s ease-in-out infinite;
+}
+.status-dot.warn {
+  color: var(--warn);
+}
+.status-dot.danger {
+  color: var(--danger);
+}
+
+.status-text {
+  font-family: var(--font-data);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+}
+.status-text.ok {
+  color: var(--ok);
+}
+.status-text.warn {
+  color: var(--warn);
+}
+.status-text.danger {
+  color: var(--danger);
+}
+
+.clocks {
+  display: flex;
+  gap: 24px;
+}
+
+.clock {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.clock .value {
+  font-size: 16px;
+}
+
+.error-banner {
+  margin: 0;
+  padding: 12px 16px;
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  background: rgba(255, 95, 86, 0.1);
+  color: var(--danger);
+  font-family: var(--font-data);
+  font-size: 13px;
+}
+
+/* ===== Layout: phone first, stacked ===== */
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
+.globe-panel {
+  height: 55vh;
+  min-height: 320px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* ===== Desktop: globe left, panels right, schedule below ===== */
+@media (min-width: 960px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr) 380px;
+    grid-template-areas:
+      'globe side'
+      'passes passes';
+  }
+
+  .globe-panel {
+    grid-area: globe;
+    height: 640px;
+  }
+
+  .sidebar {
+    grid-area: side;
+  }
+
+  .passes {
+    grid-area: passes;
+  }
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+</style>
