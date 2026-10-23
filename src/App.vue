@@ -1,18 +1,31 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import { fetchTle, type Tle } from './services/tle'
-import { getPosition, parseTle, type GeoPosition, type Satellite } from './core/position'
+import {
+  getGroundTrack,
+  getPosition,
+  parseTle,
+  type GeoPosition,
+  type Satellite,
+} from './core/position'
 import { findPasses, toCompass, type Observer, type Pass } from './core/passes'
+import GlobeView from './components/GlobeView.vue'
 
 const ISS_NORAD_ID = 25544
 const BERLIN: Observer = { latitude: 52.52, longitude: 13.405, heightKm: 0.034 }
 const SEARCH_HOURS = 7 * 24
+const TRACK_MINUTES = 95 // about one full orbit
 
 const tle = ref<Tle | null>(null)
 const position = ref<GeoPosition | null>(null)
+// shallowRef: Vue only reacts when we replace the whole array,
+// it doesn't wrap the ~100 points inside (globe.gl wants plain objects)
+const track = shallowRef<GeoPosition[]>([])
 const passes = ref<Pass[]>([])
 const error = ref<string | null>(null)
-let timer: number | undefined
+
+let positionTimer: number | undefined
+let trackTimer: number | undefined
 let satellite: Satellite | null = null // plain variable: the template never shows it
 
 function updatePosition() {
@@ -20,20 +33,32 @@ function updatePosition() {
   position.value = getPosition(satellite, new Date())
 }
 
+function updateTrack() {
+  if (!satellite) return
+  track.value = getGroundTrack(satellite, new Date(), TRACK_MINUTES)
+}
+
 onMounted(async () => {
   try {
     tle.value = await fetchTle(ISS_NORAD_ID)
     satellite = parseTle(tle.value.line1, tle.value.line2) // parse once
+
     updatePosition()
-    timer = window.setInterval(updatePosition, 1000) // propagate every second
+    updateTrack()
+    positionTimer = window.setInterval(updatePosition, 1000) // every second
+    trackTimer = window.setInterval(updateTrack, 60_000) // orbit line: every minute is enough
+
     passes.value = findPasses(satellite, BERLIN, new Date(), SEARCH_HOURS)
   } catch (e) {
     error.value = (e as Error).message
   }
 })
 
-// Stop the timer when the component goes away, so we don't leak it
-onUnmounted(() => window.clearInterval(timer))
+// Stop the timers when the component goes away, so we don't leak them
+onUnmounted(() => {
+  window.clearInterval(positionTimer)
+  window.clearInterval(trackTimer)
+})
 
 const nextVisible = computed(() => passes.value.find((p) => p.visible) ?? null)
 
@@ -64,6 +89,8 @@ function durationMin(p: Pass): number {
     <p v-if="error">Error: {{ error }}</p>
 
     <template v-else-if="position">
+      <GlobeView :position="position" :track="track" :observer="BERLIN" />
+
       <p>Latitude: {{ position.latitude.toFixed(4) }}°</p>
       <p>Longitude: {{ position.longitude.toFixed(4) }}°</p>
       <p>Altitude: {{ position.altitudeKm.toFixed(1) }} km</p>

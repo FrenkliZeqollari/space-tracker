@@ -42,3 +42,17 @@ export function getPosition(sat: Satellite, date: Date): GeoPosition {
     altitudeKm: geo.height,
   }
 }
+
+// Where will it be over the next `minutes`? One point every `stepMinutes`.
+export function getGroundTrack(
+  sat: Satellite,
+  start: Date,
+  minutes: number,
+  stepMinutes = 1,
+): GeoPosition[] {
+  const points: GeoPosition[] = []
+  for (let m = 0; m <= minutes; m += stepMinutes) {
+    points.push(getPosition(sat, new Date(start.getTime() + m * 60_000)))
+  }
+  return points
+}
